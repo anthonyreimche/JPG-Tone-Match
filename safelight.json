@@ -1,0 +1,12 @@
+{
+  "id": "com.anthonyreimche.jpg-tone-match",
+  "name": "JPG Tone Match",
+  "version": "1.0.0",
+  "description": "Auto-matches the decoded RAW to your camera's embedded JPG preview by fitting a per-photo 3D colour LUT, applied as a display-referred GPU look stage.",
+  "author": "Anthony Reimche",
+  "main": "index.js",
+  "categories": ["Color"],
+  "keywords": ["color", "lut", "camera-match", "tone", "raw", "jpeg"],
+  "license": "GPL-3.0",
+  "repository": "https://github.com/anthonyreimche/JPG-Tone-Match"
+}
