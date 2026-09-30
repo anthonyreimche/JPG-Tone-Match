@@ -18,15 +18,19 @@ manual tuning.
 
 ## Using it
 
-1. Open **Preferences ▸ Rendering ▸ Display transform** and choose **JPG Tone Match**.
-2. Open a RAW photo in Develop — the match is computed from its embedded JPG and
-   applied automatically. It's applied everywhere the pipeline renders (Develop,
-   Loupe, thumbnails).
-3. Adjust **Match intensity** in **Preferences ▸ Extensions ▸ JPG Tone Match**
-   (0% = neutral RAW, 100% = full match). The same section has **Always
-   recompute** to ignore the saved fit and re-derive on every open.
+Turn it on for a photo by choosing **"JPG Tone Match"** from the display transform menu
+in Develop's bottom bar, or make it that photo's fallback by setting it as the
+default under **Preferences ▸ Rendering ▸ Default display transform** (followed by
+any photo without its own pick). Open a RAW photo that uses it in Develop — the
+match is computed from its embedded JPG and applied automatically, everywhere
+that photo renders (Develop, Loupe, thumbnails).
 
-To turn it off, pick a different Display transform (e.g. Built-in).
+Adjust **Match intensity** in **Preferences ▸ Extensions ▸ JPG Tone Match** (0% = neutral
+RAW, 100% = full match). The same section has **Always recompute** to ignore the saved
+fit and re-derive on every open.
+
+To turn it off, pick a different Display transform from Develop's bottom bar (e.g.
+Built-in) or remove it from your Preferences default.
 
 ## How it works
 
@@ -50,16 +54,14 @@ match survives across sessions.
 
 A Safelight display-transform *pipeline* maps scene-linear → display and can't
 carry a per-photo texture, so the actual lookup runs in a GPU **processing stage**
-that is registered only while "JPG Tone Match" is the selected Display transform,
-and removed otherwise. Selecting the transform is the on/off switch; the stage is
-the engine.
+that is registered only while the open photo's Display transform is "JPG Tone
+Match", and removed otherwise. Picking the transform for a photo is that photo's
+on/off switch; the stage is the engine.
 
-## Notes & limitations
+## Known limitations
 
-- **Export** builds its own renderer that doesn't receive per-photo stage
-  textures, so the match currently affects the on-screen pipeline (Develop, Loupe,
-  thumbnails) but not exported files. The stage degrades to a safe pass-through
-  there rather than corrupting output.
+- The match stage is on for the whole app while the open photo uses it, so exporting
+  a different photo at that moment also gets the open photo's match.
 - The fit pairs the JPG and the RAW render by position. It's most accurate on an
   uncropped frame; a heavy crop can reduce alignment (mitigated by outlier
   rejection). Toggle **Always recompute** (or reopen) after a big crop.

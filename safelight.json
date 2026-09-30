@@ -1,7 +1,7 @@
 {
   "id": "com.anthonyreimche.jpg-tone-match",
   "name": "JPG Tone Match",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Auto-matches the decoded RAW to your camera's embedded JPG preview by fitting a per-photo 3D colour LUT, applied as a display-referred GPU look stage.",
   "author": "Anthony Reimche",
   "main": "index.js",

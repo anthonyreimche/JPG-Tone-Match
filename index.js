@@ -7,12 +7,14 @@
 // embedded camera JPG to the live RAW render and fits a 3D colour LUT that maps
 // one to the other.
 //
-// It is exposed as a **Display transform** (Preferences ▸ Rendering ▸ Display
-// transform → "JPG Tone Match"), not a develop panel. Selecting it enables the
-// match globally; the only setting is the match intensity. Implementation note:
-// a display-transform pipeline can't carry a per-photo texture, so the actual
-// lookup runs in a GPU processing stage that is registered ONLY while this
-// transform is selected and removed otherwise.
+// It is exposed as a **Display transform**, picked per photo from Develop's
+// bottom-bar dropdown — or set as the fallback under Preferences ▸ Rendering ▸
+// Default display transform, followed by photos without their own pick — not a
+// develop panel. Selecting it for a photo enables the match for that photo; the
+// only setting is the match intensity. Implementation note: a display-transform
+// pipeline can't carry a per-photo texture, so the actual lookup runs in a GPU
+// processing stage that is registered ONLY while the open photo's transform is
+// this one, and removed otherwise.
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -404,7 +406,7 @@ export function activate(api) {
       {
         key: "intensity", label: "Match intensity (%)", type: "number",
         default: 100, min: 0, max: 100, step: 1,
-        hint: "How strongly to apply the camera-JPG match. Enable it by choosing “JPG Tone Match” under Rendering ▸ Display transform.",
+        hint: "How strongly to apply the camera-JPG match. Turn it on for a photo by choosing \"JPG Tone Match\" from the display transform menu in Develop's bottom bar, or make it the default under Preferences ▸ Rendering.",
       },
       {
         key: "ignoreCache", label: "Always recompute", type: "boolean", default: false,
@@ -413,7 +415,14 @@ export function activate(api) {
     ],
   });
 
-  const isActive = () => pipe.getState().activeId === PIPE_ID;
+  // The transform the open photo renders with: its own pick, else the
+  // Preferences default. Cores before per-photo transforms only have the
+  // global choice.
+  const effectiveId = () =>
+    api.pipelines.effectiveId
+      ? api.pipelines.effectiveId(dev.getState().params.displayTransform ?? null)
+      : pipe.getState().activeId;
+  const isActive = () => effectiveId() === PIPE_ID;
   const intensity = () => {
     const v = Number(api.settings.get("intensity", 100));
     return Math.max(0, Math.min(1, (Number.isFinite(v) ? v : 100) / 100));
@@ -517,21 +526,26 @@ export function activate(api) {
 
   sync();
 
+  // The stage follows the open photo: switching photos, changing this photo's
+  // pick, or changing the default can each turn the match on or off.
   let lastPhoto = dev.getState().photoId;
-  const unsubDev = dev.subscribe((s) => {
-    if (s.photoId !== lastPhoto) {
-      lastPhoto = s.photoId;
-      if (isActive()) void ensureLut(s.photoId);
-    }
-  });
-
-  let lastActive = pipe.getState().activeId;
-  const unsubPipe = pipe.subscribe((s) => {
-    if (s.activeId !== lastActive) {
-      lastActive = s.activeId;
+  let lastEffective = effectiveId();
+  const reconcile = () => {
+    const photoId = dev.getState().photoId;
+    const eff = effectiveId();
+    if (eff !== lastEffective) {
+      lastEffective = eff;
+      lastPhoto = photoId;
       sync();
+      return;
     }
-  });
+    if (photoId !== lastPhoto) {
+      lastPhoto = photoId;
+      if (isActive()) void ensureLut(photoId);
+    }
+  };
+  const unsubDev = dev.subscribe(reconcile);
+  const unsubPipe = pipe.subscribe(reconcile);
 
   const unsubSettings = api.settings.onChange((key, value) => {
     if (!isActive()) return;
