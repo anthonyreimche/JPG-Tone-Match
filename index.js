@@ -38,18 +38,21 @@ const FIT_CLIP_HI = 0.988;
 
 // ---------------------------------------------------------------------------
 // GPU stage: a display-referred 3D-LUT lookup. `c` at the effects phase is
-// sRGB display-encoded, clamped [0,1] — the exact space the camera JPG lives in,
-// so the LUT maps sRGB -> sRGB directly. Manual trilinear interpolation (nearest
-// fetches) avoids tiled-atlas seams. The textureSize guard makes the stage a
-// safe pass-through whenever no LUT is bound (before a fit completes, or in
-// contexts like export that don't supply per-photo stage textures).
+// sRGB display-encoded — the space the camera JPG lives in — so the LUT maps
+// sRGB -> sRGB directly, on input clipped to [0,1]. The stage declares the
+// display's own space, so the host adds no clip of its own and only the lookup
+// clips. Manual trilinear interpolation (nearest fetches) avoids tiled-atlas
+// seams. The textureSize guard makes the stage a true pass-through whenever no
+// LUT is bound (before a fit completes, or in contexts like export that don't
+// supply per-photo stage textures).
 // ---------------------------------------------------------------------------
 
-const STAGE = {
+export const STAGE = {
   id: STAGE_ID,
   name: "JPG Tone Match",
   phase: "effects",
   priority: 40, // before vignette (50) / grain (60): the camera look sits under creative effects
+  space: { encoding: "perceptual" },
   glsl: "c = jtmSample(uMatchLut, c);",
   helpers: [
     "vec3 jtmFetch(sampler2D lut, float ri, float gi, float bi) {",
