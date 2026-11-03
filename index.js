@@ -39,9 +39,13 @@ const FIT_CLIP_HI = 0.988;
 // ---------------------------------------------------------------------------
 // GPU stage: a display-referred 3D-LUT lookup. `c` at the effects phase is
 // sRGB display-encoded — the space the camera JPG lives in — so the LUT maps
-// sRGB -> sRGB directly, on input clipped to [0,1]. The stage declares the
-// display's own space, so the host adds no clip of its own and only the lookup
-// clips. Manual trilinear interpolation (nearest fetches) avoids tiled-atlas
+// sRGB -> sRGB directly. The stage declares the display's own space, so the
+// host adds no clip of its own. The LUT only covers [0,1]: a value beyond it
+// takes the edge's output plus its own excess, so over- and under-range colour
+// keeps its range, continuous and still increasing across 0 and 1. Photos on
+// process version 1 keep the lookup they were edited with, clipped at both
+// ends, for values an earlier stage leaves outside [0, 1].
+// Manual trilinear interpolation (nearest fetches) avoids tiled-atlas
 // seams. The textureSize guard makes the stage a true pass-through whenever no
 // LUT is bound (before a fit completes, or in contexts like export that don't
 // supply per-photo stage textures).
@@ -64,8 +68,8 @@ export const STAGE = {
     "vec3 jtmSample(sampler2D lut, vec3 rgb) {",
     "  if (textureSize(lut, 0).x < 4) return rgb;", // no LUT bound -> pass through
     "  float n = 17.0;",
-    "  rgb = clamp(rgb, 0.0, 1.0);",
-    "  vec3 p = rgb * (n - 1.0);",
+    "  vec3 s = clamp(rgb, 0.0, 1.0);",
+    "  vec3 p = s * (n - 1.0);",
     "  vec3 i0 = floor(p);",
     "  vec3 f = p - i0;",
     "  vec3 i1 = min(i0 + 1.0, n - 1.0);",
@@ -83,7 +87,11 @@ export const STAGE = {
     "  vec3 c11 = mix(c011, c111, f.x);",
     "  vec3 c0 = mix(c00, c10, f.y);",
     "  vec3 c1 = mix(c01, c11, f.y);",
+    "#if SL_PROCESS_VERSION >= 2",
+    "  return mix(c0, c1, f.z) + (rgb - s);",
+    "#else",
     "  return mix(c0, c1, f.z);",
+    "#endif",
     "}",
   ].join("\n"),
   uniforms: [],
@@ -381,10 +389,27 @@ function atlasFromBytes(u8) {
 
 let cleanup = null;
 
+const NOTICE_SLOT_ID = EXT_ID + ".notice";
+const NOTICE_NO_FILE = "JPG Tone Match can't read this photo's original file, so it has nothing to match.";
+const NOTICE_NO_JPG = "This photo has no embedded camera JPG, so JPG Tone Match has nothing to match.";
+const NOTICE_FAILED = "JPG Tone Match couldn't match this photo.";
+
+const noticeWrap = {
+  position: "absolute", left: 0, right: 0, bottom: "12px",
+  display: "flex", justifyContent: "center", pointerEvents: "none",
+};
+const noticePill = {
+  margin: 0, padding: "6px 12px", borderRadius: "6px", fontSize: "12px",
+  background: "var(--color-surface-2)", color: "var(--color-text-secondary)",
+  border: "1px solid var(--color-border)",
+};
+
 export function activate(api) {
   const dev = api.stores.useDevelopStore;
   const cat = api.stores.useCatalogStore;
   const pipe = api.stores.usePipelineStore;
+  const React = api.react;
+  const h = React.createElement;
 
   const IDENTITY = identityAtlas();
   let texVersion = 1;
@@ -448,9 +473,29 @@ export function activate(api) {
     uploadAtlas(atlasAtIntensity(fittedAtlas, IDENTITY, intensity()));
   }
 
+  // Why the selected match shows nothing, drawn over the canvas while the photo
+  // it's about stays open.
+  let notice = null; // { photoId, text }
+  const noticeSubs = new Set();
+  function setNotice(next) {
+    notice = next;
+    noticeSubs.forEach((f) => f());
+  }
+  function Notice() {
+    const [, force] = React.useReducer((x) => x + 1, 0);
+    React.useEffect(() => { noticeSubs.add(force); return () => { noticeSubs.delete(force); }; }, []);
+    if (!notice || notice.photoId !== dev.getState().photoId) return null;
+    return h("div", { style: noticeWrap }, h("p", { style: noticePill, role: "status" }, notice.text));
+  }
+  api.registerSlot({ id: NOTICE_SLOT_ID, slot: "develop-canvas-overlay", component: Notice, order: 900 });
+
   async function ensureLut(photoId) {
     const token = ++generation;
+    if (notice) setNotice(null);
     if (!isActive() || !photoId) return;
+    // A newer request, or another photo opening, makes this fit stale: its LUT
+    // must never be saved or shown for whatever photo is open now.
+    const stale = () => token !== generation || dev.getState().photoId !== photoId;
 
     // Already have this photo's fit — just (re)bake at the current intensity.
     if (fittedForPhoto === photoId && fittedAtlas) { bakeAndUpload(); return; }
@@ -464,7 +509,7 @@ export function activate(api) {
     try {
       if (!ignoreCache()) {
         const cached = await api.develop.getPhotoData(LUT_DATA_KEY);
-        if (token !== generation) return;
+        if (stale()) return;
         if (cached && cached.byteLength === ATLAS_BYTES) {
           fittedAtlas = atlasFromBytes(cached);
           fittedForPhoto = photoId;
@@ -474,21 +519,25 @@ export function activate(api) {
       }
 
       const photo = cat.getState().photos.find((p) => p.id === photoId);
-      if (!photo || !photo.fileHandle) return;
+      if (!photo || !photo.fileHandle) { setNotice({ photoId, text: NOTICE_NO_FILE }); return; }
       const file = await photo.fileHandle.getFile();
-      if (token !== generation) return;
+      if (stale()) return;
 
       const blob = await extractEmbeddedJpeg(file);
-      if (token !== generation) return;
-      if (!blob) { console.warn("[JPG Tone Match] no embedded JPG in", photo.relPath || photoId); return; }
+      if (stale()) return;
+      if (!blob) {
+        console.warn("[JPG Tone Match] no embedded JPG in", photo.relPath || photoId);
+        setNotice({ photoId, text: NOTICE_NO_JPG });
+        return;
+      }
 
       const jpeg = await createImageBitmap(blob, { imageOrientation: "none" });
-      if (token !== generation) { jpeg.close(); return; }
+      if (stale()) { jpeg.close(); return; }
 
       // "before" = the live RAW render (identity LUT now, so feedback-free), in
       // display-encoded sRGB — the same space as the JPG.
       const capture = await api.develop.captureFrame(dev.getState().params);
-      if (token !== generation) { jpeg.close(); if (capture.close) capture.close(); return; }
+      if (stale()) { jpeg.close(); if (capture.close) capture.close(); return; }
 
       const scale = FIT_MAX_EDGE / Math.max(capture.width, capture.height);
       const W = Math.max(1, Math.round(capture.width * scale));
@@ -503,7 +552,7 @@ export function activate(api) {
       if (upright !== jpeg) upright.close();
       jpeg.close();
       if (capture.close) capture.close();
-      if (token !== generation) return;
+      if (stale()) return;
 
       fittedAtlas = fitAtlas(before, after);
       fittedForPhoto = photoId;
@@ -511,6 +560,7 @@ export function activate(api) {
       bakeAndUpload();
     } catch (err) {
       console.warn("[JPG Tone Match] fit failed:", err);
+      if (!stale()) setNotice({ photoId, text: NOTICE_FAILED });
     }
   }
 
@@ -536,6 +586,12 @@ export function activate(api) {
   const reconcile = () => {
     const photoId = dev.getState().photoId;
     const eff = effectiveId();
+    // Any change cancels a fit in flight, whether or not the match stays on:
+    // it was fitting the photo and transform that were open when it began.
+    if (eff !== lastEffective || photoId !== lastPhoto) {
+      generation++;
+      if (notice) setNotice(null);
+    }
     if (eff !== lastEffective) {
       lastEffective = eff;
       lastPhoto = photoId;
@@ -565,6 +621,7 @@ export function activate(api) {
     unsubPipe();
     if (unsubSettings) unsubSettings();
     setStage(false);
+    if (api.unregisterSlot) api.unregisterSlot(NOTICE_SLOT_ID);
   };
 }
 

@@ -5,6 +5,7 @@
   "description": "Auto-matches the decoded RAW to your camera's embedded JPG preview by fitting a per-photo 3D colour LUT, applied as a display-referred GPU look stage.",
   "author": "Anthony Reimche",
   "main": "index.js",
+  "minAppVersion": "3.2.0",
   "categories": ["Looks"],
   "keywords": ["color", "lut", "camera-match", "tone", "raw", "jpeg"],
   "license": "GPL-3.0",
