@@ -1,4 +1,4 @@
-// The per-photo fit through a fake host: stores, catalog and capture are stubs,
+// The per-photo fit through a fake host: stores, catalogue and capture are stubs,
 // and the browser's bitmap and canvas calls are stubbed on globalThis so the fit
 // path runs in node. Run: node --test "test/*.test.mjs"
 import { test, mock } from "node:test";
