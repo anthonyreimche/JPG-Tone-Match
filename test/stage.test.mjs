@@ -18,7 +18,17 @@ test("passes through before the lookup when no LUT is bound", () => {
   assert.ok(lookup > guard, "the lookup comes after the no-LUT guard");
 });
 
-test("needs Safelight 3.2.0, the first to define SL_PROCESS_VERSION", () => {
+// Older builds ignore `transform` and would draw the always-registered stage
+// on every photo.
+test("belongs to its display transform, so photos that render with another never draw it", () => {
+  assert.equal(STAGE.transform, "com.anthonyreimche.jpg-tone-match.transform");
+});
+
+test("draws each photo's own match: its LUT is a per-photo texture", () => {
+  assert.equal(STAGE.textures[0].perPhoto, true);
+});
+
+test("needs Safelight 3.2.7, the first to draw a stage only with its transform", () => {
   const manifest = JSON.parse(readFileSync(new URL("../safelight.json", import.meta.url), "utf8"));
-  assert.equal(manifest.minAppVersion, "3.2.0");
+  assert.equal(manifest.minAppVersion, "3.2.7");
 });

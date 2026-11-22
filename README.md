@@ -54,14 +54,17 @@ match survives across sessions.
 
 A Safelight display-transform *pipeline* maps scene-linear → display and can't
 carry a per-photo texture, so the actual lookup runs in a GPU **processing stage**
-that is registered only while the open photo's Display transform is "JPG Tone
-Match", and removed otherwise. Picking the transform for a photo is that photo's
-on/off switch; the stage is the engine.
+that belongs to the transform: Safelight draws it only for photos whose Display
+transform is "JPG Tone Match", in Develop, thumbnails and exports alike. Picking
+the transform for a photo is that photo's on/off switch; the stage is the engine.
+It needs Safelight 3.2.7.
 
 ## Known limitations
 
-- The match stage is on for the whole app while the open photo uses it, so exporting
-  a different photo at that moment also gets the open photo's match.
+- Each photo is drawn with its own fit, in Develop, thumbnails and exports. A photo
+  is fitted when it is opened in Develop with JPG Tone Match picked; until then its
+  thumbnail and export show it without a match. Photos that don't use JPG Tone
+  Match are never touched.
 - The fit pairs the JPG and the RAW render by position. It's most accurate on an
   uncropped frame; a heavy crop can reduce alignment (mitigated by outlier
   rejection). Toggle **Always recompute** (or reopen) after a big crop.

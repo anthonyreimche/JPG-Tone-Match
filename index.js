@@ -13,8 +13,11 @@
 // develop panel. Selecting it for a photo enables the match for that photo; the
 // only setting is the match intensity. Implementation note: a display-transform
 // pipeline can't carry a per-photo texture, so the actual lookup runs in a GPU
-// processing stage that is registered ONLY while the open photo's transform is
-// this one, and removed otherwise.
+// processing stage that belongs to the transform (its `transform`): Safelight
+// draws it only for photos that render with this transform, in the live view,
+// thumbnails and exports alike. Its LUT is a per-photo texture: each frame
+// draws its own photo's fit, made on demand from the fit saved with the photo,
+// and a photo not fitted yet draws without a match, never another photo's.
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -31,6 +34,8 @@ const ATLAS_H = N;
 const ATLAS_FLOATS = ATLAS_W * ATLAS_H * 4;
 const ATLAS_BYTES = ATLAS_FLOATS * 4; // Float32
 
+// The variant the fit's capture names: no photo's, so it draws without a match.
+const FIT_VARIANT = "fitting";
 const FIT_MAX_EDGE = 192; // downsample both images to this max edge before fitting
 const FIT_LAMBDA = 2.0; // identity-prior strength (nodes with < ~2 samples lean identity)
 const FIT_CLIP_LO = 0.012; // reject near-clipped input pixels (ambiguous mapping)
@@ -47,13 +52,13 @@ const FIT_CLIP_HI = 0.988;
 // ends, for values an earlier stage leaves outside [0, 1].
 // Manual trilinear interpolation (nearest fetches) avoids tiled-atlas
 // seams. The textureSize guard makes the stage a true pass-through whenever no
-// LUT is bound (before a fit completes, or in contexts like export that don't
-// supply per-photo stage textures).
+// LUT is bound (a photo with no fit yet, or one being fitted).
 // ---------------------------------------------------------------------------
 
 export const STAGE = {
   id: STAGE_ID,
   name: "JPG Tone Match",
+  transform: PIPE_ID,
   phase: "effects",
   priority: 40, // before vignette (50) / grain (60): the camera look sits under creative effects
   space: { encoding: "perceptual" },
@@ -96,7 +101,7 @@ export const STAGE = {
   ].join("\n"),
   uniforms: [],
   textures: [
-    { key: "uMatchLut", kind: "lut", width: ATLAS_W, height: ATLAS_H, format: "rgba16f" },
+    { key: "uMatchLut", kind: "lut", width: ATLAS_W, height: ATLAS_H, format: "rgba16f", perPhoto: true },
   ],
 };
 
@@ -414,9 +419,11 @@ export function activate(api) {
   const IDENTITY = identityAtlas();
   let texVersion = 1;
   let generation = 0; // bumped per (re)fit to cancel stale async work
-  let stageOn = false; // whether the GPU stage is currently registered
-  let fittedAtlas = null; // intensity-independent fit for the current photo
-  let fittedForPhoto = null; // photoId fittedAtlas belongs to
+  const fits = new Map(); // photoId -> intensity-independent fit, made or read this session
+  const fitting = new Set(); // photos being fitted
+  // Each open photo's fit while it is read or made: frames of it (a grid
+  // preview drawn as the transform is picked, an export) wait for it.
+  const pending = new Map(); // photoId -> Promise<void>
 
   // The display-transform option (the user-facing switch). No GLSL: the actual
   // lookup is the gated processing stage, which a pipeline can't host (it can't
@@ -457,21 +464,32 @@ export function activate(api) {
   };
   const ignoreCache = () => api.settings.get("ignoreCache", false) === true;
 
-  function uploadAtlas(data) {
-    api.setStageTexture(STAGE_ID, "uMatchLut", {
-      data, width: ATLAS_W, height: ATLAS_H, format: "rgba16f", version: texVersion++,
-    });
+  // A photo's match, as a frame of it asks for it (the variant is its id).
+  async function provide(photoId) {
+    await pending.get(photoId);
+    let fit = fits.get(photoId);
+    if (!fit) {
+      const saved = await api.develop.getPhotoData(LUT_DATA_KEY, photoId);
+      if (!saved || saved.byteLength !== ATLAS_BYTES) return null;
+      fit = atlasFromBytes(saved);
+      fits.set(photoId, fit);
+    }
+    return {
+      data: atlasAtIntensity(fit, IDENTITY, intensity()),
+      width: ATLAS_W,
+      height: ATLAS_H,
+      format: "rgba16f",
+      version: texVersion++,
+    };
   }
 
-  function setStage(on) {
-    if (on && !stageOn) { api.registerProcessingStage(STAGE); stageOn = true; }
-    else if (!on && stageOn) { api.unregisterProcessingStage(STAGE_ID); stageOn = false; }
+  /** The photo's match changed: frames of it ask for it again. */
+  function refresh(photoId) {
+    api.dropStageTextureVariants(STAGE_ID, "uMatchLut", photoId);
   }
 
-  function bakeAndUpload() {
-    if (!fittedAtlas) { uploadAtlas(IDENTITY); return; }
-    uploadAtlas(atlasAtIntensity(fittedAtlas, IDENTITY, intensity()));
-  }
+  api.registerProcessingStage(STAGE);
+  api.setStageTextureProvider(STAGE_ID, "uMatchLut", provide);
 
   // Why the selected match shows nothing, drawn over the canvas while the photo
   // it's about stays open.
@@ -497,26 +515,25 @@ export function activate(api) {
     // must never be saved or shown for whatever photo is open now.
     const stale = () => token !== generation || dev.getState().photoId !== photoId;
 
-    // Already have this photo's fit — just (re)bake at the current intensity.
-    if (fittedForPhoto === photoId && fittedAtlas) { bakeAndUpload(); return; }
+    // A fit made or read this session is what the photo's frames draw.
+    if (fits.has(photoId) && !ignoreCache()) return;
 
-    // Clean slate: identity so the stage is a visible no-op while we load/fit
-    // (this is also what makes the fit capture feedback-free).
-    fittedAtlas = null;
-    fittedForPhoto = null;
-    uploadAtlas(IDENTITY);
-
+    let settled;
+    const ready = new Promise((resolve) => (settled = resolve));
+    pending.set(photoId, ready);
     try {
       if (!ignoreCache()) {
-        const cached = await api.develop.getPhotoData(LUT_DATA_KEY);
+        const cached = await api.develop.getPhotoData(LUT_DATA_KEY, photoId);
         if (stale()) return;
         if (cached && cached.byteLength === ATLAS_BYTES) {
-          fittedAtlas = atlasFromBytes(cached);
-          fittedForPhoto = photoId;
-          bakeAndUpload();
+          fits.set(photoId, atlasFromBytes(cached));
+          refresh(photoId);
           return;
         }
       }
+
+      fits.delete(photoId);
+      fitting.add(photoId);
 
       const photo = cat.getState().photos.find((p) => p.id === photoId);
       if (!photo || !photo.fileHandle) { setNotice({ photoId, text: NOTICE_NO_FILE }); return; }
@@ -534,9 +551,12 @@ export function activate(api) {
       const jpeg = await createImageBitmap(blob, { imageOrientation: "none" });
       if (stale()) { jpeg.close(); return; }
 
-      // "before" = the live RAW render (identity LUT now, so feedback-free), in
-      // display-encoded sRGB — the same space as the JPG.
-      const capture = await api.develop.captureFrame(dev.getState().params);
+      // "before" = the live RAW render, in display-encoded sRGB — the same space
+      // as the JPG — drawn with a match of no photo (FIT_VARIANT), so the fit
+      // never sees an older one and never waits on itself.
+      const capture = await api.develop.captureFrame(dev.getState().params, {
+        paramBag: { [`${STAGE_ID}.uMatchLut`]: FIT_VARIANT },
+      });
       if (stale()) { jpeg.close(); if (capture.close) capture.close(); return; }
 
       const scale = FIT_MAX_EDGE / Math.max(capture.width, capture.height);
@@ -554,27 +574,23 @@ export function activate(api) {
       if (capture.close) capture.close();
       if (stale()) return;
 
-      fittedAtlas = fitAtlas(before, after);
-      fittedForPhoto = photoId;
-      api.develop.putPhotoData(LUT_DATA_KEY, new Uint8Array(fittedAtlas.buffer.slice(0)));
-      bakeAndUpload();
+      const fit = fitAtlas(before, after);
+      fits.set(photoId, fit);
+      api.develop.putPhotoData(LUT_DATA_KEY, new Uint8Array(fit.buffer.slice(0)));
     } catch (err) {
       console.warn("[JPG Tone Match] fit failed:", err);
       if (!stale()) setNotice({ photoId, text: NOTICE_FAILED });
+    } finally {
+      if (fitting.delete(photoId)) refresh(photoId);
+      if (pending.get(photoId) === ready) pending.delete(photoId);
+      settled();
     }
   }
 
-  // Reconcile to the current selection: register/remove the stage and (when on)
-  // make sure the current photo's LUT is ready.
+  // Reconcile to the current selection: when on, make sure the current photo
+  // has its fit.
   function sync() {
-    const on = isActive();
-    setStage(on);
-    if (on) {
-      void ensureLut(dev.getState().photoId);
-    } else {
-      fittedAtlas = null;
-      fittedForPhoto = null;
-    }
+    if (isActive()) void ensureLut(dev.getState().photoId);
   }
 
   sync();
@@ -607,20 +623,17 @@ export function activate(api) {
   const unsubPipe = pipe.subscribe(reconcile);
 
   const unsubSettings = api.settings.onChange((key, value) => {
-    if (!isActive()) return;
-    if (key === "ignoreCache" && value) {
-      fittedForPhoto = null; // force a fresh fit on the current photo
-      void ensureLut(dev.getState().photoId);
-    } else if (key === "intensity") {
-      bakeAndUpload();
-    }
+    // Every photo's match is drawn at the intensity: all are made again.
+    if (key === "intensity") api.dropStageTextureVariants(STAGE_ID, "uMatchLut");
+    else if (key === "ignoreCache" && value && isActive()) void ensureLut(dev.getState().photoId);
   });
 
   cleanup = () => {
     unsubDev();
     unsubPipe();
     if (unsubSettings) unsubSettings();
-    setStage(false);
+    api.setStageTextureProvider(STAGE_ID, "uMatchLut", null);
+    api.unregisterProcessingStage(STAGE_ID);
     if (api.unregisterSlot) api.unregisterSlot(NOTICE_SLOT_ID);
   };
 }
